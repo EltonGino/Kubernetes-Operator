@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - storage.example.com
+  resources:
+  - cloudbuckets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - storage.example.com
+  resources:
+  - cloudbuckets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - storage.example.com
+  resources:
+  - cloudbuckets/status
+  verbs:
+  - get
+  - patch
+  - update

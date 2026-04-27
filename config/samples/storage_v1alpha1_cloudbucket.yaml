@@ -1,0 +1,9 @@
+apiVersion: storage.example.com/v1alpha1
+kind: CloudBucket
+metadata:
+  labels:
+    app.kubernetes.io/name: kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: cloudbucket-sample
+spec:
+  # TODO(user): Add fields here
