@@ -19,66 +19,201 @@ package controller
 import (
 	"context"
 
+	storagev1alpha1 "github.com/EltonGino/Kubernetes-Operator/api/v1alpha1"
+	"github.com/EltonGino/Kubernetes-Operator/internal/bucket"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	storagev1alpha1 "github.com/EltonGino/Kubernetes-Operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 var _ = Describe("CloudBucket Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+	const namespace = "default"
 
-		ctx := context.Background()
+	ctx := context.Background()
+	reconciler := &CloudBucketReconciler{}
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+	BeforeEach(func() {
+		reconciler = &CloudBucketReconciler{
+			Client:        k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			BucketService: bucket.NewFakeService(),
 		}
-		cloudbucket := &storagev1alpha1.CloudBucket{}
+	})
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind CloudBucket")
-			err := k8sClient.Get(ctx, typeNamespacedName, cloudbucket)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &storagev1alpha1.CloudBucket{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
+	AfterEach(func() {
+		cleanupCloudBuckets(ctx, namespace)
+		cleanupSecrets(ctx, namespace)
+	})
+
+	It("sets Ready false when the credentials Secret is missing", func() {
+		cloudBucket := newCloudBucket("missing-secret-bucket", "missing-secret-creds")
+		Expect(k8sClient.Create(ctx, cloudBucket)).To(Succeed())
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(cloudBucket),
 		})
+		Expect(err).NotTo(HaveOccurred())
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &storagev1alpha1.CloudBucket{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+		actual := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), actual)).To(Succeed())
+		Expect(actual.Finalizers).To(ContainElement(cloudBucketFinalizer))
+		Expect(actual.Status.ObservedGeneration).To(Equal(actual.Generation))
+		Expect(actual.Status.Provider).To(Equal(defaultProvider))
+		Expect(actual.Status.Region).To(Equal(defaultRegion))
+		Expect(actual.Status.ActualBucketName).To(BeEmpty())
+		Expect(actual.Status.Endpoint).To(BeEmpty())
 
-			By("Cleanup the specific resource instance CloudBucket")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		ready := meta.FindStatusCondition(actual.Status.Conditions, conditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(reasonCredentialsMissing))
+
+		credentials := meta.FindStatusCondition(actual.Status.Conditions, conditionCredentialsAvailable)
+		Expect(credentials).NotTo(BeNil())
+		Expect(credentials.Status).To(Equal(metav1.ConditionFalse))
+		Expect(credentials.Reason).To(Equal(reasonCredentialsMissing))
+	})
+
+	It("uses the fake bucket service to mark a bucket ready", func() {
+		cloudBucket := newCloudBucket("ready-bucket", "ready-bucket-creds")
+		Expect(k8sClient.Create(ctx, credentialsSecret(cloudBucket.Spec.CredentialsSecretName))).To(Succeed())
+		Expect(k8sClient.Create(ctx, cloudBucket)).To(Succeed())
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(cloudBucket),
 		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &CloudBucketReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+		Expect(err).NotTo(HaveOccurred())
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
+		actual := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), actual)).To(Succeed())
+		Expect(actual.Finalizers).To(ContainElement(cloudBucketFinalizer))
+		Expect(actual.Status.ObservedGeneration).To(Equal(actual.Generation))
+		Expect(actual.Status.ActualBucketName).To(Equal(cloudBucket.Spec.BucketName))
+		Expect(actual.Status.Endpoint).To(Equal("fake://cloudbucket.local"))
+		Expect(actual.Status.Provider).To(Equal(defaultProvider))
+		Expect(actual.Status.Region).To(Equal(defaultRegion))
+
+		ready := meta.FindStatusCondition(actual.Status.Conditions, conditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready.Reason).To(Equal(reasonBucketProvisioned))
+
+		bucketProvisioned := meta.FindStatusCondition(actual.Status.Conditions, conditionBucketProvisioned)
+		Expect(bucketProvisioned).NotTo(BeNil())
+		Expect(bucketProvisioned.Status).To(Equal(metav1.ConditionTrue))
+		Expect(bucketProvisioned.Reason).To(Equal(reasonBucketProvisioned))
+	})
+
+	It("keeps successful reconciliation idempotent", func() {
+		cloudBucket := newCloudBucket("idempotent-bucket", "idempotent-bucket-creds")
+		Expect(k8sClient.Create(ctx, credentialsSecret(cloudBucket.Spec.CredentialsSecretName))).To(Succeed())
+		Expect(k8sClient.Create(ctx, cloudBucket)).To(Succeed())
+
+		request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cloudBucket)}
+		_, err := reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+
+		first := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), first)).To(Succeed())
+		firstStatus := first.Status.DeepCopy()
+
+		_, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+
+		second := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), second)).To(Succeed())
+		Expect(second.Status).To(Equal(*firstStatus))
+		Expect(second.Finalizers).To(Equal(first.Finalizers))
+	})
+
+	It("removes the finalizer after a simulated bucket delete", func() {
+		cloudBucket := newCloudBucket("delete-bucket", "delete-bucket-creds")
+		Expect(k8sClient.Create(ctx, credentialsSecret(cloudBucket.Spec.CredentialsSecretName))).To(Succeed())
+		Expect(k8sClient.Create(ctx, cloudBucket)).To(Succeed())
+
+		request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cloudBucket)}
+		_, err := reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+
+		actual := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), actual)).To(Succeed())
+		Expect(actual.Finalizers).To(ContainElement(cloudBucketFinalizer))
+
+		Expect(k8sClient.Delete(ctx, actual)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), &storagev1alpha1.CloudBucket{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}).Should(Succeed())
 	})
 })
+
+func newCloudBucket(name string, secretName string) *storagev1alpha1.CloudBucket {
+	return &storagev1alpha1.CloudBucket{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		Spec: storagev1alpha1.CloudBucketSpec{
+			BucketName:            name,
+			CredentialsSecretName: secretName,
+		},
+	}
+}
+
+func credentialsSecret(name string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		StringData: map[string]string{
+			"endpoint":  "fake://cloudbucket.local",
+			"accessKey": "fake-access-key",
+			"secretKey": "fake-secret-key",
+			"useSSL":    "false",
+		},
+	}
+}
+
+func cleanupCloudBuckets(ctx context.Context, namespace string) {
+	list := &storagev1alpha1.CloudBucketList{}
+	Expect(k8sClient.List(ctx, list, client.InNamespace(namespace))).To(Succeed())
+	for i := range list.Items {
+		cloudBucket := &list.Items[i]
+		key := types.NamespacedName{Name: cloudBucket.Name, Namespace: cloudBucket.Namespace}
+
+		current := &storagev1alpha1.CloudBucket{}
+		if err := k8sClient.Get(ctx, key, current); apierrors.IsNotFound(err) {
+			continue
+		} else {
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		if len(current.Finalizers) > 0 {
+			current.Finalizers = nil
+			Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		}
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, current))).To(Succeed())
+	}
+}
+
+func cleanupSecrets(ctx context.Context, namespace string) {
+	list := &corev1.SecretList{}
+	Expect(k8sClient.List(ctx, list, client.InNamespace(namespace))).To(Succeed())
+	for i := range list.Items {
+		secret := &list.Items[i]
+		if secret.Type == corev1.SecretTypeServiceAccountToken {
+			continue
+		}
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed())
+	}
+}
