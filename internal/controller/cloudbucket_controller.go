@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	storagev1alpha1 "github.com/EltonGino/Kubernetes-Operator/api/v1alpha1"
@@ -41,16 +42,20 @@ const (
 	cloudBucketFinalizer = "storage.example.com/cloudbucket-finalizer"
 
 	defaultRegion                = "us-south"
-	defaultProvider              = "minio"
+	defaultProvider              = bucket.ProviderMinIO
 	defaultCredentialsSecretName = "cloudbucket-credentials"
 
 	conditionReady                = "Ready"
 	conditionCredentialsAvailable = "CredentialsAvailable"
 	conditionBucketProvisioned    = "BucketProvisioned"
 
-	reasonCredentialsMissing = "CredentialsMissing"
-	reasonCredentialsFound   = "CredentialsFound"
-	reasonBucketProvisioned  = "BucketProvisioned"
+	reasonCredentialsMissing    = "CredentialsMissing"
+	reasonCredentialsInvalid    = "CredentialsInvalid"
+	reasonCredentialsFound      = "CredentialsFound"
+	reasonBucketProvisioned     = "BucketProvisioned"
+	reasonProviderUnsupported   = "ProviderUnsupported"
+	reasonBucketProvisionFailed = "BucketProvisionFailed"
+	reasonBucketDeleted         = "BucketDeleted"
 )
 
 // CloudBucketReconciler reconciles a CloudBucket object
@@ -86,8 +91,18 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	provider := cloudBucketProvider(cloudBucket)
 	secretName := cloudBucketCredentialsSecretName(cloudBucket)
 
-	if !cloudBucket.ObjectMeta.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, cloudBucket, secretName, region, log)
+	if !cloudBucket.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, cloudBucket, secretName, provider, region, log)
+	}
+
+	if !bucket.IsSupportedProvider(provider) {
+		log.Info("provider is not supported", "provider", provider)
+		if err := r.setProviderUnsupportedStatus(ctx, cloudBucket, provider, region); err != nil {
+			return ctrl.Result{}, err
+		}
+		r.recordEvent(cloudBucket, corev1.EventTypeWarning, reasonProviderUnsupported,
+			fmt.Sprintf("Provider %q is not supported yet", provider))
+		return ctrl.Result{}, nil
 	}
 
 	if !controllerutil.ContainsFinalizer(cloudBucket, cloudBucketFinalizer) {
@@ -98,7 +113,8 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		log.Info("added finalizer")
 	}
 
-	if err := r.getCredentialsSecret(ctx, cloudBucket, secretName); err != nil {
+	secret, err := r.getCredentialsSecret(ctx, cloudBucket, secretName)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("credentials Secret is missing", "secret", secretName)
 			if err := r.setCredentialsMissingStatus(ctx, cloudBucket, provider, region, secretName); err != nil {
@@ -111,8 +127,32 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	info, err := r.bucketService().EnsureBucket(ctx, cloudBucket.Spec.BucketName, region)
+	bucketService, err := r.bucketService(provider, secret)
 	if err != nil {
+		serviceErr := err
+		if isCredentialsInvalid(serviceErr) {
+			log.Info("credentials Secret is invalid", "secret", secretName)
+			if err := r.setCredentialsInvalidStatus(ctx, cloudBucket, provider, region, secretName, serviceErr); err != nil {
+				return ctrl.Result{}, err
+			}
+			r.recordEvent(cloudBucket, corev1.EventTypeWarning, reasonCredentialsInvalid,
+				fmt.Sprintf("Credentials Secret %q is invalid", secretName))
+			return ctrl.Result{}, nil
+		}
+		if isUnsupportedProvider(serviceErr) {
+			if err := r.setProviderUnsupportedStatus(ctx, cloudBucket, provider, region); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	info, err := bucketService.EnsureBucket(ctx, cloudBucket.Spec.BucketName, region)
+	if err != nil {
+		if statusErr := r.setBucketProvisionFailedStatus(ctx, cloudBucket, provider, region); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -120,7 +160,7 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 	r.recordEvent(cloudBucket, corev1.EventTypeNormal, reasonBucketProvisioned,
-		fmt.Sprintf("Bucket %q was provisioned by the fake bucket service", info.Name))
+		fmt.Sprintf("Bucket %q was provisioned", info.Name))
 	log.Info("bucket reconciled", "bucket", info.Name, "provider", provider, "region", region)
 
 	return ctrl.Result{}, nil
@@ -130,6 +170,7 @@ func (r *CloudBucketReconciler) reconcileDelete(
 	ctx context.Context,
 	cloudBucket *storagev1alpha1.CloudBucket,
 	secretName string,
+	provider string,
 	region string,
 	log logr.Logger,
 ) (ctrl.Result, error) {
@@ -137,13 +178,19 @@ func (r *CloudBucketReconciler) reconcileDelete(
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.getCredentialsSecret(ctx, cloudBucket, secretName); err != nil {
+	deleteProvider := provider
+	if cloudBucket.Status.Provider != "" {
+		deleteProvider = cloudBucket.Status.Provider
+	}
+
+	secret, err := r.getCredentialsSecret(ctx, cloudBucket, secretName)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("credentials Secret is missing during delete", "secret", secretName)
 			if err := r.setCredentialsMissingStatus(
 				ctx,
 				cloudBucket,
-				cloudBucketProvider(cloudBucket),
+				deleteProvider,
 				region,
 				secretName,
 			); err != nil {
@@ -154,7 +201,27 @@ func (r *CloudBucketReconciler) reconcileDelete(
 		return ctrl.Result{}, err
 	}
 
-	if err := r.bucketService().DeleteBucket(ctx, cloudBucket.Spec.BucketName, region); err != nil {
+	bucketService, err := r.bucketService(deleteProvider, secret)
+	if err != nil {
+		serviceErr := err
+		if isCredentialsInvalid(serviceErr) {
+			log.Info("credentials Secret is invalid during delete", "secret", secretName)
+			if err := r.setCredentialsInvalidStatus(ctx, cloudBucket, deleteProvider, region, secretName, serviceErr); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		if isUnsupportedProvider(serviceErr) {
+			log.Info("provider is not supported during delete", "provider", deleteProvider)
+			if err := r.setProviderUnsupportedStatus(ctx, cloudBucket, deleteProvider, region); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	if err := bucketService.DeleteBucket(ctx, cloudBucket.Spec.BucketName, region); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -163,9 +230,9 @@ func (r *CloudBucketReconciler) reconcileDelete(
 		return ctrl.Result{}, err
 	}
 
-	r.recordEvent(cloudBucket, corev1.EventTypeNormal, "BucketDeleted",
-		fmt.Sprintf("Bucket %q was deleted by the fake bucket service", cloudBucket.Spec.BucketName))
-	log.Info("removed finalizer after simulated bucket delete", "bucket", cloudBucket.Spec.BucketName)
+	r.recordEvent(cloudBucket, corev1.EventTypeNormal, reasonBucketDeleted,
+		fmt.Sprintf("Bucket %q was deleted", cloudBucket.Spec.BucketName))
+	log.Info("removed finalizer after bucket delete", "bucket", cloudBucket.Spec.BucketName)
 	return ctrl.Result{}, nil
 }
 
@@ -173,12 +240,13 @@ func (r *CloudBucketReconciler) getCredentialsSecret(
 	ctx context.Context,
 	cloudBucket *storagev1alpha1.CloudBucket,
 	secretName string,
-) error {
+) (*corev1.Secret, error) {
 	secret := &corev1.Secret{}
-	return r.Get(ctx, types.NamespacedName{
+	err := r.Get(ctx, types.NamespacedName{
 		Name:      secretName,
 		Namespace: cloudBucket.Namespace,
 	}, secret)
+	return secret, err
 }
 
 func (r *CloudBucketReconciler) setCredentialsMissingStatus(
@@ -212,6 +280,102 @@ func (r *CloudBucketReconciler) setCredentialsMissingStatus(
 	})
 }
 
+func (r *CloudBucketReconciler) setCredentialsInvalidStatus(
+	ctx context.Context,
+	cloudBucket *storagev1alpha1.CloudBucket,
+	provider string,
+	region string,
+	secretName string,
+	validationErr error,
+) error {
+	return r.updateStatusIfChanged(ctx, cloudBucket, func() {
+		cloudBucket.Status.ObservedGeneration = cloudBucket.Generation
+		cloudBucket.Status.ActualBucketName = ""
+		cloudBucket.Status.Endpoint = ""
+		cloudBucket.Status.CRN = ""
+		cloudBucket.Status.Provider = provider
+		cloudBucket.Status.Region = region
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionCredentialsAvailable,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonCredentialsInvalid,
+			Message:            fmt.Sprintf("Credentials Secret %q is invalid: %s", secretName, validationErr.Error()),
+		})
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonCredentialsInvalid,
+			Message:            "Provider credentials are invalid",
+		})
+	})
+}
+
+func (r *CloudBucketReconciler) setProviderUnsupportedStatus(
+	ctx context.Context,
+	cloudBucket *storagev1alpha1.CloudBucket,
+	provider string,
+	region string,
+) error {
+	return r.updateStatusIfChanged(ctx, cloudBucket, func() {
+		cloudBucket.Status.ObservedGeneration = cloudBucket.Generation
+		cloudBucket.Status.ActualBucketName = ""
+		cloudBucket.Status.Endpoint = ""
+		cloudBucket.Status.CRN = ""
+		cloudBucket.Status.Provider = provider
+		cloudBucket.Status.Region = region
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionBucketProvisioned,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonProviderUnsupported,
+			Message:            "Bucket was not provisioned because the provider is unsupported",
+		})
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonProviderUnsupported,
+			Message:            fmt.Sprintf("Provider %q is not supported yet", provider),
+		})
+	})
+}
+
+func (r *CloudBucketReconciler) setBucketProvisionFailedStatus(
+	ctx context.Context,
+	cloudBucket *storagev1alpha1.CloudBucket,
+	provider string,
+	region string,
+) error {
+	return r.updateStatusIfChanged(ctx, cloudBucket, func() {
+		cloudBucket.Status.ObservedGeneration = cloudBucket.Generation
+		cloudBucket.Status.Provider = provider
+		cloudBucket.Status.Region = region
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionCredentialsAvailable,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonCredentialsFound,
+			Message:            "Credentials Secret is available",
+		})
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionBucketProvisioned,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonBucketProvisionFailed,
+			Message:            "Bucket could not be provisioned",
+		})
+		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: cloudBucket.Generation,
+			Reason:             reasonBucketProvisionFailed,
+			Message:            "Bucket is not ready",
+		})
+	})
+}
+
 func (r *CloudBucketReconciler) setProvisionedStatus(
 	ctx context.Context,
 	cloudBucket *storagev1alpha1.CloudBucket,
@@ -238,7 +402,7 @@ func (r *CloudBucketReconciler) setProvisionedStatus(
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: cloudBucket.Generation,
 			Reason:             reasonBucketProvisioned,
-			Message:            "Bucket was provisioned by the fake bucket service",
+			Message:            "Bucket was provisioned",
 		})
 		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
@@ -263,11 +427,21 @@ func (r *CloudBucketReconciler) updateStatusIfChanged(
 	return r.Status().Update(ctx, cloudBucket)
 }
 
-func (r *CloudBucketReconciler) bucketService() bucket.Service {
+func (r *CloudBucketReconciler) bucketService(provider string, secret *corev1.Secret) (bucket.Service, error) {
 	if r.BucketService != nil {
-		return r.BucketService
+		return r.BucketService, nil
 	}
-	return bucket.NewFakeService()
+	return bucket.NewServiceForProvider(provider, secret)
+}
+
+func isCredentialsInvalid(err error) bool {
+	var invalidCredentials bucket.InvalidCredentialsError
+	return errors.As(err, &invalidCredentials)
+}
+
+func isUnsupportedProvider(err error) bool {
+	var unsupportedProvider bucket.UnsupportedProviderError
+	return errors.As(err, &unsupportedProvider)
 }
 
 func (r *CloudBucketReconciler) recordEvent(

@@ -16,7 +16,17 @@ limitations under the License.
 
 package bucket
 
-import "context"
+import (
+	"context"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+const (
+	// ProviderMinIO is the local S3-compatible provider used for development.
+	ProviderMinIO = "minio"
+)
 
 // BucketInfo describes a bucket confirmed by a storage provider.
 type BucketInfo struct {
@@ -31,4 +41,28 @@ type Service interface {
 	EnsureBucket(ctx context.Context, bucketName string, region string) (*BucketInfo, error)
 	DeleteBucket(ctx context.Context, bucketName string, region string) error
 	BucketExists(ctx context.Context, bucketName string, region string) (bool, error)
+}
+
+// UnsupportedProviderError reports a provider that is not implemented yet.
+type UnsupportedProviderError struct {
+	Provider string
+}
+
+func (e UnsupportedProviderError) Error() string {
+	return fmt.Sprintf("unsupported bucket provider %q", e.Provider)
+}
+
+// NewServiceForProvider creates the storage provider implementation selected by the CR.
+func NewServiceForProvider(provider string, secret *corev1.Secret) (Service, error) {
+	switch provider {
+	case ProviderMinIO:
+		return NewMinIOServiceFromSecret(secret)
+	default:
+		return nil, UnsupportedProviderError{Provider: provider}
+	}
+}
+
+// IsSupportedProvider reports whether this phase can reconcile the provider.
+func IsSupportedProvider(provider string) bool {
+	return provider == ProviderMinIO
 }

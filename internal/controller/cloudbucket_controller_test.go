@@ -80,6 +80,40 @@ var _ = Describe("CloudBucket Controller", func() {
 		Expect(credentials.Reason).To(Equal(reasonCredentialsMissing))
 	})
 
+	It("sets Ready false when the MinIO credentials Secret is invalid", func() {
+		realServiceReconciler := &CloudBucketReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+		cloudBucket := newCloudBucket("invalid-secret-bucket", "invalid-secret-creds")
+		secret := credentialsSecret(cloudBucket.Spec.CredentialsSecretName)
+		delete(secret.StringData, "secretKey")
+
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, cloudBucket)).To(Succeed())
+
+		_, err := realServiceReconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(cloudBucket),
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		actual := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), actual)).To(Succeed())
+		Expect(actual.Finalizers).To(ContainElement(cloudBucketFinalizer))
+
+		ready := meta.FindStatusCondition(actual.Status.Conditions, conditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(reasonCredentialsInvalid))
+		Expect(ready.Message).NotTo(ContainSubstring("fake-secret-key"))
+
+		credentials := meta.FindStatusCondition(actual.Status.Conditions, conditionCredentialsAvailable)
+		Expect(credentials).NotTo(BeNil())
+		Expect(credentials.Status).To(Equal(metav1.ConditionFalse))
+		Expect(credentials.Reason).To(Equal(reasonCredentialsInvalid))
+		Expect(credentials.Message).To(ContainSubstring(`missing required key "secretKey"`))
+	})
+
 	It("uses the fake bucket service to mark a bucket ready", func() {
 		cloudBucket := newCloudBucket("ready-bucket", "ready-bucket-creds")
 		Expect(k8sClient.Create(ctx, credentialsSecret(cloudBucket.Spec.CredentialsSecretName))).To(Succeed())
@@ -153,6 +187,35 @@ var _ = Describe("CloudBucket Controller", func() {
 			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), &storagev1alpha1.CloudBucket{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		}).Should(Succeed())
+	})
+
+	It("keeps the finalizer when the credentials Secret is missing during delete", func() {
+		cloudBucket := newCloudBucket("delete-missing-secret-bucket", "delete-missing-secret-creds")
+		secret := credentialsSecret(cloudBucket.Spec.CredentialsSecretName)
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, cloudBucket)).To(Succeed())
+
+		request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cloudBucket)}
+		_, err := reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+		actual := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), actual)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, actual)).To(Succeed())
+
+		_, err = reconciler.Reconcile(ctx, request)
+		Expect(err).NotTo(HaveOccurred())
+
+		terminating := &storagev1alpha1.CloudBucket{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cloudBucket), terminating)).To(Succeed())
+		Expect(terminating.Finalizers).To(ContainElement(cloudBucketFinalizer))
+		Expect(terminating.DeletionTimestamp.IsZero()).To(BeFalse())
+
+		ready := meta.FindStatusCondition(terminating.Status.Conditions, conditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(reasonCredentialsMissing))
 	})
 })
 
