@@ -25,21 +25,74 @@ import (
 
 // CloudBucketSpec defines the desired state of CloudBucket.
 type CloudBucketSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// BucketName is the desired object storage bucket name.
+	// +kubebuilder:validation:Required
+	BucketName string `json:"bucketName"`
 
-	// Foo is an example field of CloudBucket. Edit cloudbucket_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// Region is the target storage region.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:=us-south
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
+	Region string `json:"region,omitempty"`
+
+	// Provider selects the object storage backend.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:=minio
+	// +kubebuilder:validation:Enum=minio;ibm
+	Provider string `json:"provider,omitempty"`
+
+	// CredentialsSecretName is the Secret containing provider credentials.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:=cloudbucket-credentials
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
 }
 
 // CloudBucketStatus defines the observed state of CloudBucket.
 type CloudBucketStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions represent the latest available observations of the CloudBucket state.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Endpoint is the object storage endpoint for the provisioned bucket.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// CRN is the IBM Cloud Resource Name for the bucket when using IBM Cloud Object Storage.
+	// +optional
+	CRN string `json:"crn,omitempty"`
+
+	// ActualBucketName is the bucket name confirmed by the provider.
+	// +optional
+	ActualBucketName string `json:"actualBucketName,omitempty"`
+
+	// Provider is the storage backend used by the controller.
+	// +optional
+	Provider string `json:"provider,omitempty"`
+
+	// Region is the storage region used by the controller.
+	// +optional
+	Region string `json:"region,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Bucket",type=string,JSONPath=`.spec.bucketName`
+// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.provider`
+// +kubebuilder:printcolumn:name="Region",type=string,JSONPath=`.spec.region`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // CloudBucket is the Schema for the cloudbuckets API.
 type CloudBucket struct {

@@ -14,7 +14,23 @@ spec:
     singular: cloudbucket
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.bucketName
+      name: Bucket
+      type: string
+    - jsonPath: .spec.provider
+      name: Provider
+      type: string
+    - jsonPath: .spec.region
+      name: Region
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: CloudBucket is the Schema for the cloudbuckets API.
@@ -39,13 +55,120 @@ spec:
           spec:
             description: CloudBucketSpec defines the desired state of CloudBucket.
             properties:
-              foo:
-                description: Foo is an example field of CloudBucket. Edit cloudbucket_types.go
-                  to remove/update
+              bucketName:
+                description: BucketName is the desired object storage bucket name.
                 type: string
+              credentialsSecretName:
+                default: cloudbucket-credentials
+                description: CredentialsSecretName is the Secret containing provider
+                  credentials.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                type: string
+              provider:
+                default: minio
+                description: Provider selects the object storage backend.
+                enum:
+                - minio
+                - ibm
+                type: string
+              region:
+                default: us-south
+                description: Region is the target storage region.
+                minLength: 1
+                pattern: ^[a-z0-9-]+$
+                type: string
+            required:
+            - bucketName
             type: object
           status:
             description: CloudBucketStatus defines the observed state of CloudBucket.
+            properties:
+              actualBucketName:
+                description: ActualBucketName is the bucket name confirmed by the
+                  provider.
+                type: string
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the CloudBucket state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              crn:
+                description: CRN is the IBM Cloud Resource Name for the bucket when
+                  using IBM Cloud Object Storage.
+                type: string
+              endpoint:
+                description: Endpoint is the object storage endpoint for the provisioned
+                  bucket.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
+              provider:
+                description: Provider is the storage backend used by the controller.
+                type: string
+              region:
+                description: Region is the storage region used by the controller.
+                type: string
             type: object
         type: object
     served: true
