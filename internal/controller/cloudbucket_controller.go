@@ -383,13 +383,18 @@ func (r *CloudBucketReconciler) setProvisionedStatus(
 	region string,
 	info *bucket.BucketInfo,
 ) error {
+	actualRegion := region
+	if info.Region != "" {
+		actualRegion = info.Region
+	}
+
 	return r.updateStatusIfChanged(ctx, cloudBucket, func() {
 		cloudBucket.Status.ObservedGeneration = cloudBucket.Generation
 		cloudBucket.Status.ActualBucketName = info.Name
 		cloudBucket.Status.Endpoint = info.Endpoint
 		cloudBucket.Status.CRN = info.CRN
 		cloudBucket.Status.Provider = provider
-		cloudBucket.Status.Region = region
+		cloudBucket.Status.Region = actualRegion
 		meta.SetStatusCondition(&cloudBucket.Status.Conditions, metav1.Condition{
 			Type:               conditionCredentialsAvailable,
 			Status:             metav1.ConditionTrue,

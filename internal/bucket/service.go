@@ -19,6 +19,7 @@ package bucket
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -26,6 +27,8 @@ import (
 const (
 	// ProviderMinIO is the local S3-compatible provider used for development.
 	ProviderMinIO = "minio"
+	// ProviderIBM is IBM Cloud Object Storage.
+	ProviderIBM = "ibm"
 )
 
 // BucketInfo describes a bucket confirmed by a storage provider.
@@ -52,11 +55,26 @@ func (e UnsupportedProviderError) Error() string {
 	return fmt.Sprintf("unsupported bucket provider %q", e.Provider)
 }
 
+// InvalidCredentialsError describes invalid Secret data without exposing values.
+type InvalidCredentialsError struct {
+	Provider string
+	Problems []string
+}
+
+func (e InvalidCredentialsError) Error() string {
+	if len(e.Problems) == 0 {
+		return fmt.Sprintf("invalid %s credentials", e.Provider)
+	}
+	return fmt.Sprintf("invalid %s credentials: %s", e.Provider, strings.Join(e.Problems, "; "))
+}
+
 // NewServiceForProvider creates the storage provider implementation selected by the CR.
 func NewServiceForProvider(provider string, secret *corev1.Secret) (Service, error) {
 	switch provider {
 	case ProviderMinIO:
 		return NewMinIOServiceFromSecret(secret)
+	case ProviderIBM:
+		return NewIBMCOSServiceFromSecret(secret)
 	default:
 		return nil, UnsupportedProviderError{Provider: provider}
 	}
@@ -64,5 +82,5 @@ func NewServiceForProvider(provider string, secret *corev1.Secret) (Service, err
 
 // IsSupportedProvider reports whether this phase can reconcile the provider.
 func IsSupportedProvider(provider string) bool {
-	return provider == ProviderMinIO
+	return provider == ProviderMinIO || provider == ProviderIBM
 }

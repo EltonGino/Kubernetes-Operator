@@ -1,0 +1,12 @@
+apiVersion: storage.example.com/v1alpha1
+kind: CloudBucket
+metadata:
+  labels:
+    app.kubernetes.io/name: kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: cloudbucket-ibm-sample
+spec:
+  bucketName: replace-with-globally-unique-bucket-name
+  provider: ibm
+  region: us-south
+  credentialsSecretName: cloudbucket-ibm-credentials

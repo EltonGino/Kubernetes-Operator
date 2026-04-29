@@ -34,19 +34,6 @@ const (
 	minIOUseSSLKey    = "useSSL"
 )
 
-// InvalidCredentialsError describes invalid Secret data without exposing values.
-type InvalidCredentialsError struct {
-	Provider string
-	Problems []string
-}
-
-func (e InvalidCredentialsError) Error() string {
-	if len(e.Problems) == 0 {
-		return fmt.Sprintf("invalid %s credentials", e.Provider)
-	}
-	return fmt.Sprintf("invalid %s credentials: %s", e.Provider, strings.Join(e.Problems, "; "))
-}
-
 // MinIOCredentials contains the Secret values needed to connect to MinIO.
 type MinIOCredentials struct {
 	Endpoint  string
