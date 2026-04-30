@@ -1,10 +1,12 @@
-# IBM CloudBucket Operator
+# CloudBucket Operator
 
 [![Tests](https://github.com/EltonGino/Kubernetes-Operator/actions/workflows/test.yml/badge.svg)](https://github.com/EltonGino/Kubernetes-Operator/actions/workflows/test.yml)
 [![E2E Tests](https://github.com/EltonGino/Kubernetes-Operator/actions/workflows/test-e2e.yml/badge.svg)](https://github.com/EltonGino/Kubernetes-Operator/actions/workflows/test-e2e.yml)
 [![Lint](https://github.com/EltonGino/Kubernetes-Operator/actions/workflows/lint.yml/badge.svg)](https://github.com/EltonGino/Kubernetes-Operator/actions/workflows/lint.yml)
 
-IBM CloudBucket Operator is a production-style Kubernetes Operator written in Go. It adds a `CloudBucket` custom resource to Kubernetes and reconciles that desired state into an object storage bucket.
+A Go Kubernetes Operator for S3-compatible object storage, with MinIO local demo and optional IBM COS integration.
+
+CloudBucket Operator is a production-style Kubernetes Operator written in Go. It adds a `CloudBucket` custom resource to Kubernetes and reconciles that desired state into an object storage bucket.
 
 The project is designed to be fully evaluated without IBM Cloud, paid resources, or credit card verification. The primary demo path uses MinIO, a free S3-compatible object store that runs locally in Docker.
 
