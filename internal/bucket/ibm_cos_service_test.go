@@ -48,9 +48,6 @@ func TestIBMCOSCredentialsFromSecret(t *testing.T) {
 	if credentials.Endpoint != "https://s3.us-south.cloud-object-storage.appdomain.cloud" {
 		t.Fatalf("Endpoint = %q, want IBM COS us-south endpoint", credentials.Endpoint)
 	}
-	if credentials.CRN != credentials.ResourceInstanceID {
-		t.Fatalf("CRN = %q, want resource instance CRN", credentials.CRN)
-	}
 }
 
 func TestIBMCOSCredentialsFromSecretRequiresExpectedKeys(t *testing.T) {
@@ -130,6 +127,9 @@ func TestIBMCOSServiceEnsureBucketTreatsAlreadyExistingBucketAsSuccess(t *testin
 	if info.Name != "existing-bucket" {
 		t.Fatalf("BucketInfo.Name = %q, want existing-bucket", info.Name)
 	}
+	if info.CRN != "" {
+		t.Fatalf("BucketInfo.CRN = %q, want empty because IBM SDK bucket calls do not return bucket CRN", info.CRN)
+	}
 }
 
 func TestIBMCOSServiceDeleteBucketTreatsMissingBucketAsSuccess(t *testing.T) {
@@ -160,7 +160,6 @@ func newTestIBMCOSService(client *fakeIBMCOSClient) *IBMCOSService {
 	return &IBMCOSService{
 		client:   client,
 		endpoint: ibmCOSEndpointForRegion("us-south"),
-		crn:      "crn:v1:bluemix:public:cloud-object-storage:global:a/test::",
 		region:   "us-south",
 	}
 }

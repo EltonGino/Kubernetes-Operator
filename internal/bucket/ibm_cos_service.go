@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/IBM/ibm-cos-sdk-go/aws"
 	"github.com/IBM/ibm-cos-sdk-go/aws/awserr"
@@ -52,14 +51,12 @@ type IBMCOSCredentials struct {
 	ResourceInstanceID string
 	Region             string
 	Endpoint           string
-	CRN                string
 }
 
 // IBMCOSService provisions buckets in IBM Cloud Object Storage.
 type IBMCOSService struct {
 	client   ibmCOSClient
 	endpoint string
-	crn      string
 	region   string
 }
 
@@ -89,7 +86,6 @@ func NewIBMCOSServiceFromSecret(secret *corev1.Secret) (*IBMCOSService, error) {
 	return &IBMCOSService{
 		client:   s3.New(sess, conf),
 		endpoint: ibmCredentials.Endpoint,
-		crn:      ibmCredentials.CRN,
 		region:   ibmCredentials.Region,
 	}, nil
 }
@@ -135,7 +131,6 @@ func IBMCOSCredentialsFromSecret(secret *corev1.Secret) (IBMCOSCredentials, erro
 		ResourceInstanceID: resourceInstanceID,
 		Region:             region,
 		Endpoint:           ibmCOSEndpointForRegion(region),
-		CRN:                crnFromResourceInstanceID(resourceInstanceID),
 	}, nil
 }
 
@@ -143,7 +138,7 @@ func IBMCOSCredentialsFromSecret(secret *corev1.Secret) (IBMCOSCredentials, erro
 func (s *IBMCOSService) EnsureBucket(ctx context.Context, bucketName string, region string) (*BucketInfo, error) {
 	exists, err := s.BucketExists(ctx, bucketName, region)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("check IBM COS bucket %q: %w", bucketName, err)
 	}
 
 	if !exists {
@@ -152,7 +147,7 @@ func (s *IBMCOSService) EnsureBucket(ctx context.Context, bucketName string, reg
 		}
 		if _, err := s.client.CreateBucketWithContext(ctx, input); err != nil {
 			if !isIBMCOSAlreadyExistsError(err) {
-				return nil, err
+				return nil, fmt.Errorf("create IBM COS bucket %q: %w", bucketName, err)
 			}
 		}
 	}
@@ -160,7 +155,6 @@ func (s *IBMCOSService) EnsureBucket(ctx context.Context, bucketName string, reg
 	return &BucketInfo{
 		Name:     bucketName,
 		Endpoint: s.endpoint,
-		CRN:      s.crn,
 		Region:   s.region,
 	}, nil
 }
@@ -183,7 +177,7 @@ func (s *IBMCOSService) BucketExists(ctx context.Context, bucketName string, _ s
 func (s *IBMCOSService) DeleteBucket(ctx context.Context, bucketName string, region string) error {
 	exists, err := s.BucketExists(ctx, bucketName, region)
 	if err != nil {
-		return err
+		return fmt.Errorf("check IBM COS bucket %q before delete: %w", bucketName, err)
 	}
 	if !exists {
 		return nil
@@ -195,20 +189,13 @@ func (s *IBMCOSService) DeleteBucket(ctx context.Context, bucketName string, reg
 		if isIBMCOSNotFoundError(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("delete IBM COS bucket %q: %w", bucketName, err)
 	}
 	return nil
 }
 
 func ibmCOSEndpointForRegion(region string) string {
 	return fmt.Sprintf("https://s3.%s.cloud-object-storage.appdomain.cloud", region)
-}
-
-func crnFromResourceInstanceID(resourceInstanceID string) string {
-	if strings.HasPrefix(resourceInstanceID, "crn:") {
-		return resourceInstanceID
-	}
-	return ""
 }
 
 func isIBMRegion(region string) bool {
