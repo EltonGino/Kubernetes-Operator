@@ -39,6 +39,7 @@ import (
 
 	storagev1alpha1 "github.com/EltonGino/Kubernetes-Operator/api/v1alpha1"
 	"github.com/EltonGino/Kubernetes-Operator/internal/controller"
+	cloudmetrics "github.com/EltonGino/Kubernetes-Operator/internal/metrics"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -199,6 +200,11 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	if err := cloudmetrics.RegisterCloudBucketStateCollector(mgr.GetClient()); err != nil {
+		setupLog.Error(err, "unable to register CloudBucket state metrics")
 		os.Exit(1)
 	}
 

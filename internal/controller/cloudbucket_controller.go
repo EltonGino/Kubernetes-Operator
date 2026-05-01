@@ -20,9 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	storagev1alpha1 "github.com/EltonGino/Kubernetes-Operator/api/v1alpha1"
 	"github.com/EltonGino/Kubernetes-Operator/internal/bucket"
+	cloudmetrics "github.com/EltonGino/Kubernetes-Operator/internal/metrics"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -76,7 +78,28 @@ type CloudBucketReconciler struct {
 // move the current state of the cluster closer to the desired state.
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
-func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	startedAt := time.Now()
+	metricProvider := cloudmetrics.ProviderUnknown
+	metricResult := cloudmetrics.ResultSuccess
+	metricReason := cloudmetrics.ReasonUnknown
+	markReconcileError := func(reason string) {
+		metricResult = cloudmetrics.ResultError
+		metricReason = reason
+	}
+	setMetricProvider := func(provider string) {
+		metricProvider = provider
+	}
+	defer func() {
+		if retErr != nil && metricResult != cloudmetrics.ResultError {
+			markReconcileError(cloudmetrics.ReasonBucketError)
+		}
+		cloudmetrics.RecordReconcile(metricProvider, metricResult, time.Since(startedAt))
+		if metricResult == cloudmetrics.ResultError {
+			cloudmetrics.RecordReconcileError(metricProvider, metricReason)
+		}
+	}()
+
 	log := logf.FromContext(ctx).WithValues("cloudbucket", req.NamespacedName)
 
 	cloudBucket := &storagev1alpha1.CloudBucket{}
@@ -90,16 +113,31 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	region := cloudBucketRegion(cloudBucket)
 	provider := cloudBucketProvider(cloudBucket)
 	secretName := cloudBucketCredentialsSecretName(cloudBucket)
+	setMetricProvider(provider)
 
 	if !cloudBucket.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, cloudBucket, secretName, provider, region, log)
+		if err := r.reconcileDelete(
+			ctx,
+			cloudBucket,
+			secretName,
+			provider,
+			region,
+			log,
+			setMetricProvider,
+			markReconcileError,
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	if !bucket.IsSupportedProvider(provider) {
 		log.Info("provider is not supported", "provider", provider)
 		if err := r.setProviderUnsupportedStatus(ctx, cloudBucket, provider, region); err != nil {
+			markReconcileError(cloudmetrics.ReasonStatusUpdateError)
 			return ctrl.Result{}, err
 		}
+		markReconcileError(cloudmetrics.ReasonProviderUnsupported)
 		r.recordEvent(cloudBucket, corev1.EventTypeWarning, reasonProviderUnsupported,
 			fmt.Sprintf("Provider %q is not supported yet", provider))
 		return ctrl.Result{}, nil
@@ -108,18 +146,36 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if !controllerutil.ContainsFinalizer(cloudBucket, cloudBucketFinalizer) {
 		controllerutil.AddFinalizer(cloudBucket, cloudBucketFinalizer)
 		if err := r.Update(ctx, cloudBucket); err != nil {
+			cloudmetrics.RecordFinalizerOperation(
+				provider,
+				cloudmetrics.FinalizerOperationAdd,
+				cloudmetrics.ResultError,
+			)
+			markReconcileError(cloudmetrics.ReasonFinalizerError)
 			return ctrl.Result{}, err
 		}
+		cloudmetrics.RecordFinalizerOperation(
+			provider,
+			cloudmetrics.FinalizerOperationAdd,
+			cloudmetrics.ResultSuccess,
+		)
 		log.Info("added finalizer")
 	}
 
 	secret, err := r.getCredentialsSecret(ctx, cloudBucket, secretName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			cloudmetrics.RecordCredentialCheck(
+				provider,
+				cloudmetrics.ResultError,
+				cloudmetrics.CredentialReasonMissing,
+			)
 			log.Info("credentials Secret is missing", "secret", secretName)
 			if err := r.setCredentialsMissingStatus(ctx, cloudBucket, provider, region, secretName); err != nil {
+				markReconcileError(cloudmetrics.ReasonStatusUpdateError)
 				return ctrl.Result{}, err
 			}
+			markReconcileError(cloudmetrics.ReasonCredentialsMissing)
 			r.recordEvent(cloudBucket, corev1.EventTypeWarning, reasonCredentialsMissing,
 				fmt.Sprintf("Credentials Secret %q was not found", secretName))
 			return ctrl.Result{}, nil
@@ -131,32 +187,65 @@ func (r *CloudBucketReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err != nil {
 		serviceErr := err
 		if isCredentialsInvalid(serviceErr) {
+			cloudmetrics.RecordCredentialCheck(
+				provider,
+				cloudmetrics.ResultError,
+				cloudmetrics.CredentialReasonInvalid,
+			)
 			log.Info("credentials Secret is invalid", "secret", secretName)
 			if err := r.setCredentialsInvalidStatus(ctx, cloudBucket, provider, region, secretName, serviceErr); err != nil {
+				markReconcileError(cloudmetrics.ReasonStatusUpdateError)
 				return ctrl.Result{}, err
 			}
+			markReconcileError(cloudmetrics.ReasonCredentialsInvalid)
 			r.recordEvent(cloudBucket, corev1.EventTypeWarning, reasonCredentialsInvalid,
 				fmt.Sprintf("Credentials Secret %q is invalid", secretName))
 			return ctrl.Result{}, nil
 		}
 		if isUnsupportedProvider(serviceErr) {
 			if err := r.setProviderUnsupportedStatus(ctx, cloudBucket, provider, region); err != nil {
+				markReconcileError(cloudmetrics.ReasonStatusUpdateError)
 				return ctrl.Result{}, err
 			}
+			markReconcileError(cloudmetrics.ReasonProviderUnsupported)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+	cloudmetrics.RecordCredentialCheck(
+		provider,
+		cloudmetrics.ResultSuccess,
+		cloudmetrics.CredentialReasonFound,
+	)
 
+	bucketOperationStartedAt := time.Now()
 	info, err := bucketService.EnsureBucket(ctx, cloudBucket.Spec.BucketName, region)
+	bucketOperationResult := cloudmetrics.ResultSuccess
 	if err != nil {
+		bucketOperationResult = cloudmetrics.ResultError
+	}
+	cloudmetrics.RecordBucketOperation(
+		provider,
+		cloudmetrics.OperationEnsureBucket,
+		bucketOperationResult,
+		time.Since(bucketOperationStartedAt),
+	)
+	if err != nil {
+		cloudmetrics.RecordBucketOperationError(
+			provider,
+			cloudmetrics.OperationEnsureBucket,
+			cloudmetrics.ReasonBucketError,
+		)
 		if statusErr := r.setBucketProvisionFailedStatus(ctx, cloudBucket, provider, region); statusErr != nil {
+			markReconcileError(cloudmetrics.ReasonStatusUpdateError)
 			return ctrl.Result{}, statusErr
 		}
+		markReconcileError(cloudmetrics.ReasonBucketError)
 		return ctrl.Result{}, err
 	}
 
 	if err := r.setProvisionedStatus(ctx, cloudBucket, provider, region, info); err != nil {
+		markReconcileError(cloudmetrics.ReasonStatusUpdateError)
 		return ctrl.Result{}, err
 	}
 	r.recordEvent(cloudBucket, corev1.EventTypeNormal, reasonBucketProvisioned,
@@ -173,19 +262,27 @@ func (r *CloudBucketReconciler) reconcileDelete(
 	provider string,
 	region string,
 	log logr.Logger,
-) (ctrl.Result, error) {
+	setMetricProvider func(string),
+	markReconcileError func(string),
+) error {
 	if !controllerutil.ContainsFinalizer(cloudBucket, cloudBucketFinalizer) {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	deleteProvider := provider
 	if cloudBucket.Status.Provider != "" {
 		deleteProvider = cloudBucket.Status.Provider
 	}
+	setMetricProvider(deleteProvider)
 
 	secret, err := r.getCredentialsSecret(ctx, cloudBucket, secretName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			cloudmetrics.RecordCredentialCheck(
+				deleteProvider,
+				cloudmetrics.ResultError,
+				cloudmetrics.CredentialReasonMissing,
+			)
 			log.Info("credentials Secret is missing during delete", "secret", secretName)
 			if err := r.setCredentialsMissingStatus(
 				ctx,
@@ -194,46 +291,92 @@ func (r *CloudBucketReconciler) reconcileDelete(
 				region,
 				secretName,
 			); err != nil {
-				return ctrl.Result{}, err
+				markReconcileError(cloudmetrics.ReasonStatusUpdateError)
+				return err
 			}
-			return ctrl.Result{}, nil
+			markReconcileError(cloudmetrics.ReasonCredentialsMissing)
+			return nil
 		}
-		return ctrl.Result{}, err
+		return err
 	}
 
 	bucketService, err := r.bucketService(deleteProvider, secret)
 	if err != nil {
 		serviceErr := err
 		if isCredentialsInvalid(serviceErr) {
+			cloudmetrics.RecordCredentialCheck(
+				deleteProvider,
+				cloudmetrics.ResultError,
+				cloudmetrics.CredentialReasonInvalid,
+			)
 			log.Info("credentials Secret is invalid during delete", "secret", secretName)
 			if err := r.setCredentialsInvalidStatus(ctx, cloudBucket, deleteProvider, region, secretName, serviceErr); err != nil {
-				return ctrl.Result{}, err
+				markReconcileError(cloudmetrics.ReasonStatusUpdateError)
+				return err
 			}
-			return ctrl.Result{}, nil
+			markReconcileError(cloudmetrics.ReasonCredentialsInvalid)
+			return nil
 		}
 		if isUnsupportedProvider(serviceErr) {
 			log.Info("provider is not supported during delete", "provider", deleteProvider)
 			if err := r.setProviderUnsupportedStatus(ctx, cloudBucket, deleteProvider, region); err != nil {
-				return ctrl.Result{}, err
+				markReconcileError(cloudmetrics.ReasonStatusUpdateError)
+				return err
 			}
-			return ctrl.Result{}, nil
+			markReconcileError(cloudmetrics.ReasonProviderUnsupported)
+			return nil
 		}
-		return ctrl.Result{}, err
+		return err
 	}
+	cloudmetrics.RecordCredentialCheck(
+		deleteProvider,
+		cloudmetrics.ResultSuccess,
+		cloudmetrics.CredentialReasonFound,
+	)
 
+	bucketOperationStartedAt := time.Now()
 	if err := bucketService.DeleteBucket(ctx, cloudBucket.Spec.BucketName, region); err != nil {
-		return ctrl.Result{}, err
+		cloudmetrics.RecordBucketOperation(
+			deleteProvider,
+			cloudmetrics.OperationDeleteBucket,
+			cloudmetrics.ResultError,
+			time.Since(bucketOperationStartedAt),
+		)
+		cloudmetrics.RecordBucketOperationError(
+			deleteProvider,
+			cloudmetrics.OperationDeleteBucket,
+			cloudmetrics.ReasonBucketError,
+		)
+		markReconcileError(cloudmetrics.ReasonBucketError)
+		return err
 	}
+	cloudmetrics.RecordBucketOperation(
+		deleteProvider,
+		cloudmetrics.OperationDeleteBucket,
+		cloudmetrics.ResultSuccess,
+		time.Since(bucketOperationStartedAt),
+	)
 
 	controllerutil.RemoveFinalizer(cloudBucket, cloudBucketFinalizer)
 	if err := r.Update(ctx, cloudBucket); err != nil {
-		return ctrl.Result{}, err
+		cloudmetrics.RecordFinalizerOperation(
+			deleteProvider,
+			cloudmetrics.FinalizerOperationRemove,
+			cloudmetrics.ResultError,
+		)
+		markReconcileError(cloudmetrics.ReasonFinalizerError)
+		return err
 	}
+	cloudmetrics.RecordFinalizerOperation(
+		deleteProvider,
+		cloudmetrics.FinalizerOperationRemove,
+		cloudmetrics.ResultSuccess,
+	)
 
 	r.recordEvent(cloudBucket, corev1.EventTypeNormal, reasonBucketDeleted,
 		fmt.Sprintf("Bucket %q was deleted", cloudBucket.Spec.BucketName))
 	log.Info("removed finalizer after bucket delete", "bucket", cloudBucket.Spec.BucketName)
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *CloudBucketReconciler) getCredentialsSecret(

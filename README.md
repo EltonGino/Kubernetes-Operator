@@ -375,6 +375,51 @@ IBM COS status note:
 
 The current IBM SDK bucket calls do not return a bucket CRN, so `status.crn` is intentionally left empty instead of copying the resource instance CRN and making status misleading.
 
+## Observability and Metrics
+
+The operator uses the standard controller-runtime metrics endpoint. That means Kubernetes/controller metrics are exposed by the manager, and the project also adds custom CloudBucket metrics for the object-storage reconciliation flow.
+
+Custom CloudBucket metrics:
+
+- `cloudbucket_reconcile_total`
+- `cloudbucket_reconcile_errors_total`
+- `cloudbucket_reconcile_duration_seconds`
+- `cloudbucket_bucket_operations_total`
+- `cloudbucket_bucket_operation_errors_total`
+- `cloudbucket_bucket_operation_duration_seconds`
+- `cloudbucket_ready`
+- `cloudbucket_not_ready`
+- `cloudbucket_finalizer_operations_total`
+- `cloudbucket_credentials_checks_total`
+
+The custom metrics follow a low-cardinality label policy. Labels are limited to controlled values such as provider, result, reason, and operation. Bucket names, Secret names, namespaces, and Kubernetes resource names are never used as metric labels.
+
+The Ready and NotReady gauges are aggregate state metrics. They count CloudBucket resources by provider and safe readiness reason without exposing individual resource identity.
+
+To view metrics while running the operator locally, make sure `kubectl` is pointed at a working cluster and the CRD is installed:
+
+```sh
+kubectl config use-context kind-cloudbucket-dev
+gmake install
+```
+
+Then start the manager with an insecure local metrics endpoint and keep this terminal running:
+
+```sh
+go run ./cmd/main.go \
+  --metrics-bind-address=:8080 \
+  --metrics-secure=false \
+  --health-probe-bind-address=:8082
+```
+
+Scrape it from another terminal:
+
+```sh
+curl http://localhost:8080/metrics | grep cloudbucket_
+```
+
+In cluster deployments, the same metrics are served through the controller-runtime metrics endpoint configured by the generated manager manifests.
+
 ## Development Commands
 
 ```sh
