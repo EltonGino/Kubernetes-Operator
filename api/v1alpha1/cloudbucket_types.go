@@ -27,6 +27,9 @@ import (
 type CloudBucketSpec struct {
 	// BucketName is the desired object storage bucket name.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BucketName string `json:"bucketName"`
 
 	// Region is the target storage region.

@@ -40,6 +40,7 @@ import (
 	storagev1alpha1 "github.com/EltonGino/Kubernetes-Operator/api/v1alpha1"
 	"github.com/EltonGino/Kubernetes-Operator/internal/controller"
 	cloudmetrics "github.com/EltonGino/Kubernetes-Operator/internal/metrics"
+	webhookv1alpha1 "github.com/EltonGino/Kubernetes-Operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -215,6 +216,12 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CloudBucket")
 		os.Exit(1)
+	}
+	if os.Getenv("ENABLE_WEBHOOKS") == "true" {
+		if err := webhookv1alpha1.SetupCloudBucketWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "CloudBucket")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

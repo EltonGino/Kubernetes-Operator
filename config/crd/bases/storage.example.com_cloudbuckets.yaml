@@ -57,6 +57,9 @@ spec:
             properties:
               bucketName:
                 description: BucketName is the desired object storage bucket name.
+                maxLength: 63
+                minLength: 3
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               credentialsSecretName:
                 default: cloudbucket-credentials

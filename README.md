@@ -114,7 +114,8 @@ The reconcile loop is idempotent: repeated reconciles converge on the same bucke
 - Operator SDK
 - Kubebuilder and controller-runtime
 - Kubernetes CustomResourceDefinitions
-- Kubernetes finalizers, status conditions, RBAC, Events, and Secrets
+- Kubernetes finalizers, status conditions, admission webhooks, RBAC, Events, and Secrets
+- cert-manager for webhook serving certificates in cluster deployments
 - MinIO for zero-cost local object storage
 - IBM Cloud Object Storage SDK for optional enterprise integration
 - kind for local Kubernetes testing
@@ -130,9 +131,11 @@ The reconcile loop is idempotent: repeated reconciles converge on the same bucke
 - Defaulted `spec.credentialsSecretName: cloudbucket-credentials`
 - Status subresource with useful fields and conditions
 - Printer columns for bucket, provider, region, readiness, and age
+- Mutating and validating admission webhooks for API defaults and input validation
 - Fully working MinIO bucket provisioning
 - Fully working MinIO bucket deletion through finalizers
 - Optional IBM COS provider implementation
+- Custom low-cardinality Prometheus metrics
 - Missing and invalid credentials handling
 - Least-privilege Secret access using `get` only
 - Kubernetes Events for lifecycle transitions
@@ -216,6 +219,50 @@ The generated controller role grants the reconciler only the access it needs:
 - Create and patch Events.
 
 The controller does not need broad Secret permissions such as `list`, `watch`, `create`, `update`, or `delete`.
+
+## Validation Webhook
+
+The deployed manager includes mutating and validating admission webhooks for `CloudBucket`.
+
+The mutating webhook applies the same safe defaults used by the controller:
+
+- `spec.provider: minio`
+- `spec.region: us-south`
+- `spec.credentialsSecretName: cloudbucket-credentials`
+
+The validating webhook rejects invalid API input before the reconciler sees it:
+
+- `spec.bucketName` is required.
+- Bucket names must be 3 to 63 characters.
+- Bucket names must be lowercase.
+- Bucket names may contain only lowercase letters, numbers, and hyphens.
+- Bucket names must start and end with a lowercase letter or number.
+- Bucket names must not contain underscores.
+- `spec.provider` must be `minio` or `ibm`.
+- `spec.region` must not be empty after defaulting.
+
+The webhook does not validate provider credential values. Credentials live in Kubernetes Secrets and are validated by the reconciler/provider layer without exposing Secret values.
+
+To test admission locally, deploy the manager in-cluster with cert-manager installed, then apply a valid resource:
+
+```sh
+kubectl apply -f config/samples/storage_v1alpha1_cloudbucket.yaml
+```
+
+Try an invalid bucket name:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: storage.example.com/v1alpha1
+kind: CloudBucket
+metadata:
+  name: invalid-bucket
+spec:
+  bucketName: Invalid_Bucket
+EOF
+```
+
+Expected result: Kubernetes rejects the request with webhook validation errors explaining that bucket names must be lowercase and must not contain underscores.
 
 ## Local Demo With MinIO
 
@@ -455,8 +502,6 @@ The e2e suite deploys the operator into a real kind cluster and verifies that th
 
 ## Roadmap
 
-- Custom Prometheus metrics
-- Validation webhook
 - OLM/OpenShift bundle
 - GitHub Actions polish
 - Architecture diagram
